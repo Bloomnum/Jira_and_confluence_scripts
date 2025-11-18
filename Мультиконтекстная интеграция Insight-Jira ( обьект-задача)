@@ -1,0 +1,103 @@
+//ATL-4253
+
+import com.atlassian.jira.issue.index.ThreadLocalSearcherCache
+import com.atlassian.jira.bc.issue.search.SearchService
+import com.atlassian.jira.web.bean.PagerFilter
+import com.onresolve.jira.groovy.user.FieldBehaviours
+import com.onresolve.scriptrunner.runner.customisers.PluginModule
+import com.onresolve.scriptrunner.runner.customisers.WithPlugin
+import groovy.transform.BaseScript
+import com.atlassian.jira.component.ComponentAccessor
+import com.atlassian.jira.jql.parser.JqlQueryParser
+import com.atlassian.jira.issue.MutableIssue
+import com.atlassian.jira.user.util.UserManager
+
+@WithPlugin('com.riadalabs.jira.plugins.insight')
+@BaseScript FieldBehaviours fieldBehaviours
+// @PluginModule ObjectFacade objectFacade
+// @PluginModule ObjectTypeAttributeFacade objectTypeAttributeFacade
+
+def userToSetAsLoggedIn = ComponentAccessor.getUserManager().getUserByName("astrabot")
+ComponentAccessor.getJiraAuthenticationContext().setLoggedInUser(userToSetAsLoggedIn)
+
+def logObjectKey = event.getObjectBean().getObjectKey()
+//log.warn("Собираю лог ключа объекта: " + logObjectKey)
+
+def logObjectTypeId = event.getObjectBean().objectTypeId
+//log.warn("Собираю лог id type object: " + logObjectTypeId)
+
+if(logObjectTypeId != 50){ // Проверка, что объект который создается относится к объекту "Организация" (id = 50)
+    return false
+}
+else {
+    // Создан объект "Организация"
+    String org = logObjectKey
+
+    def attr_inn = Assets.getByKey("${org}").getAttributeValues('ИНН')
+
+    if(attr_inn != []){// Атрибут 'ИНН' - не пустой!
+
+        def attr_inn_value = attr_inn.value[0]
+        // Поиск задач JQL:
+        def jqlSearch = "project = TENDER AND issuetype = Закупка AND  'ИНН (заказчик)' ~ '" + attr_inn_value + "' AND 'Организация (insight)' is EMPTY"
+
+        List<MutableIssue> issues = searchIssues(jqlSearch)
+        log.warn("Найдено задач: " + issues.size())
+
+        if (issues.size() != 0) { // Если JQL находит задачи то :
+            // 1) Получение значения в атрибуте "Закрепленный менеджер в 1С
+            def attr_manager_1c_value = Assets.getByKey("${org}")?.getAttributeValues('Закрепленный менеджер в 1С')?.referenceId?.getAt(0)
+
+            // 2) Получение значения в атрибуте "Уровень контрагента"
+            def attr_level_agent_value = Assets.getByKey("${org}")?.getAttributeValues('Уровень контрагента')?.value?.getAt(0)
+
+            issues.each { issue ->
+                issue.update {
+                    if (org) {
+                        setCustomFieldValue(21501, org) // cf Организация (insight)
+                    }
+
+                    if (attr_manager_1c_value) {
+                        String valid_obj_employee = "USER-" + "$attr_manager_1c_value"
+                        def attr_jira_user_value = Assets.getByKey("$valid_obj_employee")?.getAttributeValues('JIRA User')?.value?.getAt(0)
+                        def userManager = ComponentAccessor.getUserManager() as UserManager
+                        def user = userManager.getUserByKey("$attr_jira_user_value")?.getName()
+                        if (user) {
+                            setCustomFieldValue(21200, user) // cf Ответственный за контрагента
+                        }
+                    }
+
+                    if (attr_level_agent_value) {
+                        setCustomFieldValue(26300, attr_level_agent_value) // cf Уровень контрагента
+                    }
+
+                    setCustomFieldValue(20404, "действующий клиент") // cf Тип организатора
+                }
+            }
+
+            log.warn("Обновлено ${issues.size()} задач")
+        } else {
+            log.warn("Задачи не найдены")
+        }
+    } else {
+        log.warn("пустой атрбут ИНН")
+        return false
+    }
+}
+
+//Создан отдельный поток,на выполнение поиска задач JQL, на низкоуровневом контексте. Иначе  jira не может выполнить корректно поиск и выдает ошибку: Incorrect usage of JIRA/lucene search API
+private List<MutableIssue> searchIssues(String jqlSearch) {
+    try {
+        ThreadLocalSearcherCache.startSearcherContext()
+        def user = ComponentAccessor.jiraAuthenticationContext.loggedInUser
+        def searchService = ComponentAccessor.getComponent(SearchService)
+        def queryParser = ComponentAccessor.getComponent(JqlQueryParser)
+        def query = queryParser.parseQuery(jqlSearch)
+        def searchResults = searchService.search(user, query, PagerFilter.getUnlimitedFilter())
+        def issueManager = ComponentAccessor.issueManager
+        return searchResults.results.collect { issueManager.getIssueObject(it.id) }
+    } finally {
+        ThreadLocalSearcherCache.stopAndCloseSearcherContext()
+    }
+}
+
