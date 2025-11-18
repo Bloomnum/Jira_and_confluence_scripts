@@ -1,0 +1,145 @@
+import java.text.SimpleDateFormat
+import com.atlassian.jira.issue.CustomFieldManager
+import com.atlassian.jira.issue.fields.CustomField
+import com.atlassian.jira.component.ComponentAccessor
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+import org.apache.http.client.methods.HttpPost
+import org.apache.http.entity.StringEntity
+import org.apache.http.impl.client.HttpClients
+import org.apache.http.util.EntityUtils
+
+def issue = event.getIssue()
+def customFieldManager = ComponentAccessor.getCustomFieldManager()
+
+String issueKey = issue.getKey()
+String baseUrl = ComponentAccessor.getApplicationProperties().getString("jira.baseurl")
+
+// Конфигурация кастомных полей
+def customFields = [
+    Type_of_project: 22500,
+    org: 21501,
+    Pasport_project: 19204,
+    Plan_project: 25717,
+    Uslugi_project: 25718,
+    Product_Active: 21100,
+    Assignee_project: 25719,
+    TG_S: 13502,
+    TG_E: 13503
+]
+
+
+def getFieldValue(fieldId) {
+    def field = customFieldManager.getCustomFieldObject(fieldId)
+    return issue.getCustomFieldValue(field)
+}
+
+// Получение всех значений кастомных полей
+def fieldValues = customFields.collectEntries { name, id ->
+    [(name): getFieldValue(id)]
+}
+
+// Извлечение и обработка значений
+def customFieldValue_Type_of_project = fieldValues.Type_of_project
+def customFieldValue_org = fieldValues.org
+def customFieldValue_Pasport_project = fieldValues.Pasport_project
+def customFieldValue_Plan_project = fieldValues.Plan_project
+def customFieldValue_Uslugi_project = fieldValues.Uslugi_project
+def customFieldValue_Product_Active = fieldValues.Product_Active
+def customFieldValue_Assignee_project = fieldValues.Assignee_project
+def customFieldValue_TG_S = fieldValues.TG_S
+def customFieldValue_TG_E = fieldValues.TG_E
+
+// Обработка дат
+SimpleDateFormat sdf = new SimpleDateFormat("dd.MM.yy")
+Date date_TG_S = customFieldValue_TG_S != null ? (Date) customFieldValue_TG_S : null
+Date date_TG_E = customFieldValue_TG_E != null ? (Date) customFieldValue_TG_E : null
+
+// Значения полей
+def issueUrl = baseUrl + "/browse/" + issueKey
+def summary = issue.getSummary()
+
+def first_frame_Type_of_project = customFieldValue_Type_of_project != null ? customFieldValue_Type_of_project.values()[0] : null
+def org_valid = customFieldValue_org != null ? "CLIBD-" + "${customFieldValue_org.id[0]}" : null
+def product_Active_valid = customFieldValue_Product_Active != null ? "PRODB-" + "${customFieldValue_Product_Active.id[0]}" : null
+
+String date_TG_S_valid = date_TG_S != null ? sdf.format(date_TG_S) : null
+String date_TG_E_valid = date_TG_E != null ? sdf.format(date_TG_E) : null
+
+def description = issue.getDescription()
+def status = issue.getStatus().getName()
+
+// Функция для создания объекта в Insight
+def createInsightObject(String schemaKey, String objectTypeName, Map<String, String> attributes) {
+ def httpClient = HttpClients.createDefault()
+    def httpPost = new HttpPost("https://your_jira.com/rest/insight/1.0/object/create")
+
+    httpPost.setHeader("Content-Type", "application/json")
+    httpPost.setHeader("Authorization", "Basic " + "xxxx")
+
+
+    def formattedAttributes = attributes.collect { key, value ->
+        [
+            objectTypeAttributeId: key,
+            objectAttributeValues: [
+                [value: value]
+            ]
+        ]
+    }
+
+    def objectData = [
+        schemaKey: schemaKey,
+        type: objectTypeName,
+        objectTypeId: "866", // Указывается напрямую, так как не передается через параметры функции
+        attributes: formattedAttributes
+    ]
+
+    httpPost.setEntity(new StringEntity(JsonOutput.toJson(objectData)))
+
+    def response = httpClient.execute(httpPost)
+        // Проверка статуса ответа на успешность авторизации
+    if (response.getStatusLine().getStatusCode() == 201) {
+        log.info("Authorization successful")
+    } else if (response.getStatusLine().getStatusCode() == 401) {
+        log.error("Authorization failed: Unauthorized")
+    } else if (response.getStatusLine().getStatusCode() == 400) {
+        log.error("Bad Request")
+    } else {
+        log.error("Unexpected response status: " + response.getStatusLine().getStatusCode())
+    }
+
+    def responseBody = EntityUtils.toString(response.getEntity())
+    def responseJson = new JsonSlurper().parseText(responseBody)
+
+    // Логирование статуса ответа и тела ответа
+    log.info("Response status: " + response.getStatusLine().getStatusCode())
+    log.info("Response body: " + responseBody)
+
+
+
+    httpClient.close()
+
+    return responseJson
+}
+
+// Данные для объекта
+def schemaKey = "CLIBD"
+def objectTypeName = "Технический проект"
+def attributes = [
+    "7058": summary.toString(),
+    "7061": issueUrl,
+    "7062": first_frame_Type_of_project?.toString(),
+    "7063": org_valid?.toString(),
+    "7064": customFieldValue_Pasport_project?.toString(),
+    "7065": customFieldValue_Plan_project?.toString(),
+    "7066": customFieldValue_Uslugi_project?.toString(),
+    "7067": product_Active_valid?.toString(),
+    "7068": customFieldValue_Assignee_project?.toString(),
+    "7069": issue.getAssigneeId(),
+    "7070": date_TG_S_valid,
+    "7071": date_TG_E_valid,
+    "7072": description,
+    "7073": status
+]
+
+def result = createInsightObject(schemaKey, objectTypeName, attributes)
